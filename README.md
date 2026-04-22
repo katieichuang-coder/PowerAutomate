@@ -24,11 +24,11 @@ Create a list called **`SurveyAssignments`** with these columns:
 | `Title`             | Single line of text     | Name of the survey (built-in column).         |
 | `AssigneeEmail`     | Single line of text     | Email address of the person to remind.        |
 | `DueDate`           | Date and Time (Date only) | The due date of the survey.                 |
-| `Completed`         | Yes/No                  | Default `No`. Flip to `Yes` on submission.    |
+| `Completed`         | Yes/No                  | Default `No`. Flipped to `Yes` by the ingestion flow on submission. |
 | `SurveyLink`        | Hyperlink               | URL to the survey (Forms, Qualtrics, etc.).   |
-| `LastReminderSent`  | Date and Time           | Written by the flow. Leave blank initially.   |
-
-> **Tip:** If you are using **Microsoft Forms**, add a companion flow ("When a new response is submitted") that updates the matching `SurveyAssignments` row and sets `Completed = Yes`.
+| `LastReminderSent`  | Date and Time           | Written by the reminder flow. Leave blank initially. |
+| `CompletedDate`     | Date and Time           | Written by the ingestion flow on submission.  |
+| `Answer1`, `Answer2`, `Answer3` | Multiple lines of text | One column per Forms question you want to capture. Add as many as you need and rename to match the question. |
 
 ## 2. Build the flow
 
@@ -110,7 +110,62 @@ Save the flow. Run **Test → Manually** with a row whose `DueDate` is yesterday
   - *Dataverse:* replace Get items / Update item with **List rows** and **Update a row**. The filter becomes `cr_completed eq false and cr_duedate le @{outputs('todayDate')}`.
   - *Excel (OneDrive/SharePoint):* use **List rows present in a table** + **Update a row**. Filter rows with a **Filter array** action instead of OData, because Excel connectors do not support `le` reliably on date columns.
 
+## 3. Build the Forms ingestion flow
+
+The reminder flow only works if rows in `SurveyAssignments` get marked `Completed = Yes` when a user actually submits the survey. This second flow listens to a Microsoft Forms form, looks up the matching assignment row, marks it complete, and copies the answers you care about into the list.
+
+### Prerequisite — capture the responder's email
+
+Microsoft Forms only fills the `Responder` field automatically when the form is restricted to your organization (**Settings → Only people in my organization can respond**, with **Record name** enabled). If your form is public, add an explicit "Email address" question and reference that question in the flow instead of the built-in `responder` field.
+
+### Find your IDs (you'll paste these into the flow)
+
+- **Form ID:** in the form URL, the value after `?id=`.
+- **Question IDs:** when you add the **Get response details** action and use the dynamic content panel, each question shows up as `outputs('Get_response_details')?['body/<questionId>']`. Hover over each one to grab the ID, or just pick from the dynamic content menu in the UI.
+
+### Build it (Automated cloud flow)
+
+**Trigger — When a new response is submitted** (Microsoft Forms)
+- Form Id: pick your form.
+
+**Action 1 — Get response details** (Microsoft Forms)
+- Form Id: same form.
+- Response Id: `@triggerOutputs()?['body/resourceData/responseId']` (offered as dynamic content "Response Id").
+
+**Action 2 — Get items** (SharePoint) — find the matching open assignment
+- Site Address / List Name: same as the reminder flow.
+- Filter Query:
+  ```
+  AssigneeEmail eq '@{outputs('Get_response_details')?['body/responder']}' and Title eq 'Q2 Engagement Survey' and Completed eq 0
+  ```
+  Replace `Q2 Engagement Survey` with the survey title you used when seeding the list. If you have several surveys ingested by the same flow, parameterize this string or use a different flow per form.
+- Top Count: `1`.
+
+**Action 3 — Condition** — `length(outputs('Get_items')?['body/value']) is greater than 0`
+
+**If Yes — Update item** (SharePoint)
+- Id: `@first(outputs('Get_items')?['body/value'])?['ID']`
+- Title: pass through the existing Title.
+- Completed: `Yes`
+- CompletedDate: `@utcNow()`
+- Answer1, Answer2, Answer3: pick the question outputs from the **Get response details** dynamic content panel.
+
+**If No — Create item** (SharePoint) — defensive branch for "responded without ever being assigned"
+- Title: the survey title.
+- AssigneeEmail: `@outputs('Get_response_details')?['body/responder']`
+- DueDate: `@utcNow()`
+- Completed: `Yes`
+- CompletedDate: `@utcNow()`
+- Answer1, Answer2, Answer3: same dynamic content as above.
+
+Save and submit a test response to verify the row is updated and the next morning's reminder run skips it.
+
+### One form per flow
+
+Microsoft Forms triggers are bound to a single form, so create one ingestion flow per form. The reminder flow stays singular because it just reads the SharePoint list.
+
 ## Files in this repo
 
 - `README.md` — this file.
-- `flow-definition.json` — the Logic Apps / Power Automate workflow definition for the flow described above. Use it as a reference when building by hand, or adapt it to import via the Power Automate ALM tooling / `pac` CLI.
+- `flow-definition.json` — the reminder flow (daily recurrence → SharePoint query → email + stamp).
+- `forms-to-sharepoint-flow.json` — the Forms ingestion flow (Forms response → look up assignment → update row with answers and `Completed = Yes`). Replace the `REPLACE_WITH_QUESTION_*_ID` placeholders with the real Forms question IDs before importing or use it purely as a reference while building the flow in the UI.

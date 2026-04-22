@@ -1,0 +1,144 @@
+{
+  "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "$connections": {
+      "defaultValue": {},
+      "type": "Object"
+    },
+    "sharepointSiteAddress": {
+      "defaultValue": "https://contoso.sharepoint.com/sites/Surveys",
+      "type": "String"
+    },
+    "sharepointListName": {
+      "defaultValue": "SurveyAssignments",
+      "type": "String"
+    },
+    "formId": {
+      "defaultValue": "REPLACE_WITH_MS_FORMS_ID",
+      "type": "String",
+      "metadata": {
+        "description": "The Microsoft Forms form ID. Found in the form URL after ?id=."
+      }
+    },
+    "surveyTitle": {
+      "defaultValue": "Q2 Engagement Survey",
+      "type": "String",
+      "metadata": {
+        "description": "Must match the Title value used when the assignment row was created."
+      }
+    }
+  },
+  "triggers": {
+    "When_a_new_form_response_is_submitted": {
+      "type": "OpenApiConnectionWebhook",
+      "inputs": {
+        "host": {
+          "connectionName": "shared_microsoftforms",
+          "operationId": "CreateFormWebhook",
+          "apiId": "/providers/Microsoft.PowerApps/apis/shared_microsoftforms"
+        },
+        "parameters": {
+          "form_id": "@parameters('formId')"
+        }
+      }
+    }
+  },
+  "actions": {
+    "Get_response_details": {
+      "type": "OpenApiConnection",
+      "inputs": {
+        "host": {
+          "connectionName": "shared_microsoftforms",
+          "operationId": "GetFormResponse",
+          "apiId": "/providers/Microsoft.PowerApps/apis/shared_microsoftforms"
+        },
+        "parameters": {
+          "form_id": "@parameters('formId')",
+          "response_id": "@triggerOutputs()?['body/resourceData/responseId']"
+        }
+      },
+      "runAfter": {}
+    },
+    "Find_matching_assignment": {
+      "type": "OpenApiConnection",
+      "inputs": {
+        "host": {
+          "connectionName": "shared_sharepointonline",
+          "operationId": "GetItems",
+          "apiId": "/providers/Microsoft.PowerApps/apis/shared_sharepointonline"
+        },
+        "parameters": {
+          "dataset": "@parameters('sharepointSiteAddress')",
+          "table": "@parameters('sharepointListName')",
+          "$filter": "AssigneeEmail eq '@{outputs('Get_response_details')?['body/responder']}' and Title eq '@{parameters('surveyTitle')}' and Completed eq 0",
+          "$top": 1
+        }
+      },
+      "runAfter": {
+        "Get_response_details": ["Succeeded"]
+      }
+    },
+    "If_assignment_row_found": {
+      "type": "If",
+      "expression": {
+        "greater": [
+          "@length(outputs('Find_matching_assignment')?['body/value'])",
+          0
+        ]
+      },
+      "actions": {
+        "Update_existing_row": {
+          "type": "OpenApiConnection",
+          "inputs": {
+            "host": {
+              "connectionName": "shared_sharepointonline",
+              "operationId": "PatchItem",
+              "apiId": "/providers/Microsoft.PowerApps/apis/shared_sharepointonline"
+            },
+            "parameters": {
+              "dataset": "@parameters('sharepointSiteAddress')",
+              "table": "@parameters('sharepointListName')",
+              "id": "@first(outputs('Find_matching_assignment')?['body/value'])?['ID']",
+              "item/Title": "@parameters('surveyTitle')",
+              "item/Completed": true,
+              "item/CompletedDate": "@utcNow()",
+              "item/Answer1": "@outputs('Get_response_details')?['body/REPLACE_WITH_QUESTION_1_ID']",
+              "item/Answer2": "@outputs('Get_response_details')?['body/REPLACE_WITH_QUESTION_2_ID']",
+              "item/Answer3": "@outputs('Get_response_details')?['body/REPLACE_WITH_QUESTION_3_ID']"
+            }
+          }
+        }
+      },
+      "else": {
+        "actions": {
+          "Create_new_row_for_unsolicited_response": {
+            "type": "OpenApiConnection",
+            "inputs": {
+              "host": {
+                "connectionName": "shared_sharepointonline",
+                "operationId": "PostItem",
+                "apiId": "/providers/Microsoft.PowerApps/apis/shared_sharepointonline"
+              },
+              "parameters": {
+                "dataset": "@parameters('sharepointSiteAddress')",
+                "table": "@parameters('sharepointListName')",
+                "item/Title": "@parameters('surveyTitle')",
+                "item/AssigneeEmail": "@outputs('Get_response_details')?['body/responder']",
+                "item/DueDate": "@utcNow()",
+                "item/Completed": true,
+                "item/CompletedDate": "@utcNow()",
+                "item/Answer1": "@outputs('Get_response_details')?['body/REPLACE_WITH_QUESTION_1_ID']",
+                "item/Answer2": "@outputs('Get_response_details')?['body/REPLACE_WITH_QUESTION_2_ID']",
+                "item/Answer3": "@outputs('Get_response_details')?['body/REPLACE_WITH_QUESTION_3_ID']"
+              }
+            }
+          }
+        }
+      },
+      "runAfter": {
+        "Find_matching_assignment": ["Succeeded"]
+      }
+    }
+  }
+}
