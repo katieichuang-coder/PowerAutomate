@@ -8,10 +8,7 @@
     },
     "sharepointSiteAddress": {
       "defaultValue": "https://contoso.sharepoint.com/sites/Surveys",
-      "type": "String",
-      "metadata": {
-        "description": "SharePoint site that hosts the SurveyAssignments list."
-      }
+      "type": "String"
     },
     "sharepointListName": {
       "defaultValue": "SurveyAssignments",
@@ -38,7 +35,7 @@
       "inputs": "@formatDateTime(utcNow(), 'yyyy-MM-dd')",
       "runAfter": {}
     },
-    "Get_overdue_incomplete_surveys": {
+    "Get_outstanding_assignments": {
       "type": "OpenApiConnection",
       "inputs": {
         "host": {
@@ -49,7 +46,7 @@
         "parameters": {
           "dataset": "@parameters('sharepointSiteAddress')",
           "table": "@parameters('sharepointListName')",
-          "$filter": "Completed eq 0 and DueDate le '@{outputs('todayDate')}'",
+          "$filter": "Completed eq 0 and ReleaseDate le '@{outputs('todayDate')}' and ResearchEndDate ge '@{utcNow()}'",
           "$top": 5000
         }
       },
@@ -57,10 +54,61 @@
         "todayDate": ["Succeeded"]
       }
     },
-    "For_each_overdue_assignment": {
+    "Filter_trigger_rows": {
+      "type": "Query",
+      "inputs": {
+        "from": "@outputs('Get_outstanding_assignments')?['body/value']",
+        "where": "@and(lessOrEquals(item()?['ReminderDate'], outputs('todayDate')), equals(item()?['LastReminderSent'], null))"
+      },
+      "runAfter": {
+        "Get_outstanding_assignments": ["Succeeded"]
+      }
+    },
+    "Select_trigger_emails": {
+      "type": "Select",
+      "inputs": {
+        "from": "@body('Filter_trigger_rows')",
+        "select": "@toLower(item()?['AssigneeEmail'])"
+      },
+      "runAfter": {
+        "Filter_trigger_rows": ["Succeeded"]
+      }
+    },
+    "Unique_assignee_emails": {
+      "type": "Compose",
+      "inputs": "@union(body('Select_trigger_emails'), body('Select_trigger_emails'))",
+      "runAfter": {
+        "Select_trigger_emails": ["Succeeded"]
+      }
+    },
+    "For_each_unique_assignee": {
       "type": "Foreach",
-      "foreach": "@outputs('Get_overdue_incomplete_surveys')?['body/value']",
+      "foreach": "@outputs('Unique_assignee_emails')",
       "actions": {
+        "Filter_this_assignees_outstanding": {
+          "type": "Query",
+          "inputs": {
+            "from": "@outputs('Get_outstanding_assignments')?['body/value']",
+            "where": "@equals(toLower(item()?['AssigneeEmail']), items('For_each_unique_assignee'))"
+          }
+        },
+        "Select_outstanding_list_items": {
+          "type": "Select",
+          "inputs": {
+            "from": "@body('Filter_this_assignees_outstanding')",
+            "select": "<li><strong>@{item()?['Title']}</strong> &mdash; <a href=\"@{item()?['SurveyLink']}\">Open survey</a></li>"
+          },
+          "runAfter": {
+            "Filter_this_assignees_outstanding": ["Succeeded"]
+          }
+        },
+        "Research_end_pretty": {
+          "type": "Compose",
+          "inputs": "@formatDateTime(first(body('Filter_this_assignees_outstanding'))?['ResearchEndDate'], 'dddd d MMMM yyyy, h:mm tt')",
+          "runAfter": {
+            "Select_outstanding_list_items": ["Succeeded"]
+          }
+        },
         "Send_reminder_email": {
           "type": "OpenApiConnection",
           "inputs": {
@@ -70,13 +118,25 @@
               "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365"
             },
             "parameters": {
-              "emailMessage/To": "@items('For_each_overdue_assignment')?['AssigneeEmail']",
-              "emailMessage/Subject": "Reminder: please complete \"@{items('For_each_overdue_assignment')?['Title']}\"",
-              "emailMessage/Body": "<p>Hi,</p><p>Our records show that the survey <strong>@{items('For_each_overdue_assignment')?['Title']}</strong> was due on <strong>@{formatDateTime(items('For_each_overdue_assignment')?['DueDate'], 'MMMM d, yyyy')}</strong> and has not yet been submitted.</p><p>Please take a moment to complete it: <a href=\"@{items('For_each_overdue_assignment')?['SurveyLink']}\">Open the survey</a></p><p>Thanks!</p>",
+              "emailMessage/To": "@items('For_each_unique_assignee')",
+              "emailMessage/Subject": "Reminder: outstanding survey(s) to complete",
+              "emailMessage/Body": "<p>Hi,</p><p>You still have <strong>@{length(body('Filter_this_assignees_outstanding'))}</strong> outstanding survey(s) to complete before the research period closes on <strong>@{outputs('Research_end_pretty')}</strong>:</p><ul>@{join(body('Select_outstanding_list_items'), '')}</ul><p>Thanks!</p>",
               "emailMessage/Importance": "Normal"
             }
+          },
+          "runAfter": {
+            "Research_end_pretty": ["Succeeded"]
           }
-        },
+        }
+      },
+      "runAfter": {
+        "Unique_assignee_emails": ["Succeeded"]
+      }
+    },
+    "For_each_trigger_row_stamp_reminder_sent": {
+      "type": "Foreach",
+      "foreach": "@body('Filter_trigger_rows')",
+      "actions": {
         "Stamp_LastReminderSent": {
           "type": "OpenApiConnection",
           "inputs": {
@@ -88,18 +148,15 @@
             "parameters": {
               "dataset": "@parameters('sharepointSiteAddress')",
               "table": "@parameters('sharepointListName')",
-              "id": "@items('For_each_overdue_assignment')?['ID']",
-              "item/Title": "@items('For_each_overdue_assignment')?['Title']",
+              "id": "@items('For_each_trigger_row_stamp_reminder_sent')?['ID']",
+              "item/Title": "@items('For_each_trigger_row_stamp_reminder_sent')?['Title']",
               "item/LastReminderSent": "@utcNow()"
             }
-          },
-          "runAfter": {
-            "Send_reminder_email": ["Succeeded"]
           }
         }
       },
       "runAfter": {
-        "Get_overdue_incomplete_surveys": ["Succeeded"]
+        "For_each_unique_assignee": ["Succeeded"]
       }
     }
   }
