@@ -1,0 +1,156 @@
+{
+  "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "$connections": {
+      "defaultValue": {},
+      "type": "Object"
+    },
+    "sharepointSiteAddress": {
+      "defaultValue": "https://contoso.sharepoint.com/sites/Surveys",
+      "type": "String"
+    },
+    "sharepointListName": {
+      "defaultValue": "SurveyAssignments",
+      "type": "String"
+    },
+    "excelDriveId": {
+      "defaultValue": "REPLACE_WITH_SHAREPOINT_DOCUMENT_LIBRARY_ID",
+      "type": "String",
+      "metadata": {
+        "description": "The SharePoint document library that holds the distribution list workbook."
+      }
+    },
+    "excelFileId": {
+      "defaultValue": "REPLACE_WITH_FILE_ID",
+      "type": "String",
+      "metadata": {
+        "description": "The ID of the .xlsx file containing the distribution list table."
+      }
+    },
+    "excelTableName": {
+      "defaultValue": "Distribution",
+      "type": "String",
+      "metadata": {
+        "description": "The Excel table name (Insert > Table) inside the workbook. Plain ranges will not work."
+      }
+    }
+  },
+  "triggers": {
+    "Manually_trigger_a_flow": {
+      "type": "Request",
+      "kind": "Button",
+      "inputs": {
+        "schema": {
+          "type": "object",
+          "properties": {
+            "surveyTitle": {
+              "type": "string",
+              "title": "Survey title",
+              "description": "Used as the Title column on every assignment row."
+            },
+            "surveyLink": {
+              "type": "string",
+              "title": "Survey link",
+              "format": "uri"
+            },
+            "dueDate": {
+              "type": "string",
+              "title": "Due date (yyyy-MM-dd)",
+              "format": "date"
+            }
+          },
+          "required": ["surveyTitle", "surveyLink", "dueDate"]
+        }
+      }
+    }
+  },
+  "actions": {
+    "Get_existing_assignments_for_this_survey": {
+      "type": "OpenApiConnection",
+      "inputs": {
+        "host": {
+          "connectionName": "shared_sharepointonline",
+          "operationId": "GetItems",
+          "apiId": "/providers/Microsoft.PowerApps/apis/shared_sharepointonline"
+        },
+        "parameters": {
+          "dataset": "@parameters('sharepointSiteAddress')",
+          "table": "@parameters('sharepointListName')",
+          "$filter": "Title eq '@{triggerBody()?['surveyTitle']}'",
+          "$select": "AssigneeEmail",
+          "$top": 5000
+        }
+      },
+      "runAfter": {}
+    },
+    "List_rows_from_distribution_workbook": {
+      "type": "OpenApiConnection",
+      "inputs": {
+        "host": {
+          "connectionName": "shared_excelonlinebusiness",
+          "operationId": "GetItems",
+          "apiId": "/providers/Microsoft.PowerApps/apis/shared_excelonlinebusiness"
+        },
+        "parameters": {
+          "source": "@parameters('excelDriveId')",
+          "drive": "@parameters('excelDriveId')",
+          "file": "@parameters('excelFileId')",
+          "table": "@parameters('excelTableName')"
+        }
+      },
+      "runAfter": {
+        "Get_existing_assignments_for_this_survey": ["Succeeded"]
+      }
+    },
+    "For_each_distribution_row": {
+      "type": "Foreach",
+      "foreach": "@outputs('List_rows_from_distribution_workbook')?['body/value']",
+      "actions": {
+        "Already_assigned": {
+          "type": "Query",
+          "inputs": {
+            "from": "@outputs('Get_existing_assignments_for_this_survey')?['body/value']",
+            "where": "@equals(toLower(item()?['AssigneeEmail']), toLower(items('For_each_distribution_row')?['Email']))"
+          }
+        },
+        "If_not_already_assigned": {
+          "type": "If",
+          "expression": {
+            "equals": [
+              "@length(body('Already_assigned'))",
+              0
+            ]
+          },
+          "actions": {
+            "Create_assignment_row": {
+              "type": "OpenApiConnection",
+              "inputs": {
+                "host": {
+                  "connectionName": "shared_sharepointonline",
+                  "operationId": "PostItem",
+                  "apiId": "/providers/Microsoft.PowerApps/apis/shared_sharepointonline"
+                },
+                "parameters": {
+                  "dataset": "@parameters('sharepointSiteAddress')",
+                  "table": "@parameters('sharepointListName')",
+                  "item/Title": "@triggerBody()?['surveyTitle']",
+                  "item/AssigneeEmail": "@items('For_each_distribution_row')?['Email']",
+                  "item/DueDate": "@triggerBody()?['dueDate']",
+                  "item/SurveyLink": "@triggerBody()?['surveyLink']",
+                  "item/Completed": false
+                }
+              }
+            }
+          },
+          "runAfter": {
+            "Already_assigned": ["Succeeded"]
+          }
+        }
+      },
+      "runAfter": {
+        "List_rows_from_distribution_workbook": ["Succeeded"]
+      }
+    }
+  }
+}
