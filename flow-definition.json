@@ -1,0 +1,106 @@
+{
+  "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "$connections": {
+      "defaultValue": {},
+      "type": "Object"
+    },
+    "sharepointSiteAddress": {
+      "defaultValue": "https://contoso.sharepoint.com/sites/Surveys",
+      "type": "String",
+      "metadata": {
+        "description": "SharePoint site that hosts the SurveyAssignments list."
+      }
+    },
+    "sharepointListName": {
+      "defaultValue": "SurveyAssignments",
+      "type": "String"
+    }
+  },
+  "triggers": {
+    "Daily_at_9am": {
+      "type": "Recurrence",
+      "recurrence": {
+        "frequency": "Day",
+        "interval": 1,
+        "schedule": {
+          "hours": ["9"],
+          "minutes": [0]
+        },
+        "timeZone": "UTC"
+      }
+    }
+  },
+  "actions": {
+    "todayDate": {
+      "type": "Compose",
+      "inputs": "@formatDateTime(utcNow(), 'yyyy-MM-dd')",
+      "runAfter": {}
+    },
+    "Get_overdue_incomplete_surveys": {
+      "type": "OpenApiConnection",
+      "inputs": {
+        "host": {
+          "connectionName": "shared_sharepointonline",
+          "operationId": "GetItems",
+          "apiId": "/providers/Microsoft.PowerApps/apis/shared_sharepointonline"
+        },
+        "parameters": {
+          "dataset": "@parameters('sharepointSiteAddress')",
+          "table": "@parameters('sharepointListName')",
+          "$filter": "Completed eq 0 and DueDate le '@{outputs('todayDate')}'",
+          "$top": 5000
+        }
+      },
+      "runAfter": {
+        "todayDate": ["Succeeded"]
+      }
+    },
+    "For_each_overdue_assignment": {
+      "type": "Foreach",
+      "foreach": "@outputs('Get_overdue_incomplete_surveys')?['body/value']",
+      "actions": {
+        "Send_reminder_email": {
+          "type": "OpenApiConnection",
+          "inputs": {
+            "host": {
+              "connectionName": "shared_office365",
+              "operationId": "SendEmailV2",
+              "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365"
+            },
+            "parameters": {
+              "emailMessage/To": "@items('For_each_overdue_assignment')?['AssigneeEmail']",
+              "emailMessage/Subject": "Reminder: please complete \"@{items('For_each_overdue_assignment')?['Title']}\"",
+              "emailMessage/Body": "<p>Hi,</p><p>Our records show that the survey <strong>@{items('For_each_overdue_assignment')?['Title']}</strong> was due on <strong>@{formatDateTime(items('For_each_overdue_assignment')?['DueDate'], 'MMMM d, yyyy')}</strong> and has not yet been submitted.</p><p>Please take a moment to complete it: <a href=\"@{items('For_each_overdue_assignment')?['SurveyLink']}\">Open the survey</a></p><p>Thanks!</p>",
+              "emailMessage/Importance": "Normal"
+            }
+          }
+        },
+        "Stamp_LastReminderSent": {
+          "type": "OpenApiConnection",
+          "inputs": {
+            "host": {
+              "connectionName": "shared_sharepointonline",
+              "operationId": "PatchItem",
+              "apiId": "/providers/Microsoft.PowerApps/apis/shared_sharepointonline"
+            },
+            "parameters": {
+              "dataset": "@parameters('sharepointSiteAddress')",
+              "table": "@parameters('sharepointListName')",
+              "id": "@items('For_each_overdue_assignment')?['ID']",
+              "item/Title": "@items('For_each_overdue_assignment')?['Title']",
+              "item/LastReminderSent": "@utcNow()"
+            }
+          },
+          "runAfter": {
+            "Send_reminder_email": ["Succeeded"]
+          }
+        }
+      },
+      "runAfter": {
+        "Get_overdue_incomplete_surveys": ["Succeeded"]
+      }
+    }
+  }
+}
