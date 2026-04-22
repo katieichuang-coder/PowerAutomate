@@ -28,7 +28,8 @@ Create a list called **`SurveyAssignments`** with these columns:
 | `SurveyLink`        | Hyperlink               | URL to the survey (Forms, Qualtrics, etc.).   |
 | `LastReminderSent`  | Date and Time           | Written by the reminder flow. Leave blank initially. |
 | `CompletedDate`     | Date and Time           | Written by the ingestion flow on submission.  |
-| `Answer1`, `Answer2`, `Answer3` | Multiple lines of text | One column per Forms question you want to capture. Add as many as you need and rename to match the question. |
+| `ResponderName`     | Single line of text     | Written by the ingestion flow on submission.  |
+| `Answer1`           | Multiple lines of text  | Answer to the first Forms question. Rename to match the actual question if you like. |
 
 ## 2. Build the flow
 
@@ -132,7 +133,12 @@ Microsoft Forms only fills the `Responder` field automatically when the form is 
 - Form Id: same form.
 - Response Id: `@triggerOutputs()?['body/resourceData/responseId']` (offered as dynamic content "Response Id").
 
-**Action 2 — Get items** (SharePoint) — find the matching open assignment
+**Action 2 — Get user profile (V2)** (Office 365 Users) — resolve the responder's display name
+- User (UPN): `@outputs('Get_response_details')?['body/responder']`
+
+  Microsoft Forms returns the responder as an email/UPN, not a friendly name. This step turns it into "Jane Doe". Skip this action if your form has an explicit "Name" question — just use that question's answer instead.
+
+**Action 3 — Get items** (SharePoint) — find the matching open assignment
 - Site Address / List Name: same as the reminder flow.
 - Filter Query:
   ```
@@ -141,14 +147,15 @@ Microsoft Forms only fills the `Responder` field automatically when the form is 
   Replace `Q2 Engagement Survey` with the survey title you used when seeding the list. If you have several surveys ingested by the same flow, parameterize this string or use a different flow per form.
 - Top Count: `1`.
 
-**Action 3 — Condition** — `length(outputs('Get_items')?['body/value']) is greater than 0`
+**Action 4 — Condition** — `length(outputs('Get_items')?['body/value']) is greater than 0`
 
 **If Yes — Update item** (SharePoint)
 - Id: `@first(outputs('Get_items')?['body/value'])?['ID']`
 - Title: pass through the existing Title.
 - Completed: `Yes`
 - CompletedDate: `@utcNow()`
-- Answer1, Answer2, Answer3: pick the question outputs from the **Get response details** dynamic content panel.
+- ResponderName: `@outputs('Get_user_profile_(V2)')?['body/displayName']`
+- Answer1: pick the answer to question 1 from the **Get response details** dynamic content panel.
 
 **If No — Create item** (SharePoint) — defensive branch for "responded without ever being assigned"
 - Title: the survey title.
@@ -156,7 +163,8 @@ Microsoft Forms only fills the `Responder` field automatically when the form is 
 - DueDate: `@utcNow()`
 - Completed: `Yes`
 - CompletedDate: `@utcNow()`
-- Answer1, Answer2, Answer3: same dynamic content as above.
+- ResponderName: `@outputs('Get_user_profile_(V2)')?['body/displayName']`
+- Answer1: same dynamic content as above.
 
 Save and submit a test response to verify the row is updated and the next morning's reminder run skips it.
 
@@ -168,4 +176,4 @@ Microsoft Forms triggers are bound to a single form, so create one ingestion flo
 
 - `README.md` — this file.
 - `flow-definition.json` — the reminder flow (daily recurrence → SharePoint query → email + stamp).
-- `forms-to-sharepoint-flow.json` — the Forms ingestion flow (Forms response → look up assignment → update row with answers and `Completed = Yes`). Replace the `REPLACE_WITH_QUESTION_*_ID` placeholders with the real Forms question IDs before importing or use it purely as a reference while building the flow in the UI.
+- `forms-to-sharepoint-flow.json` — the Forms ingestion flow (Forms response → resolve responder display name → look up assignment → write `ResponderName`, `AssigneeEmail`, `Answer1`, and `Completed = Yes`). Replace the `REPLACE_WITH_QUESTION_1_ID` placeholder with the real Forms question ID before importing, or use the file purely as a reference while building the flow in the UI.

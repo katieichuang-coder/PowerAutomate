@@ -60,6 +60,22 @@
       },
       "runAfter": {}
     },
+    "Get_user_profile": {
+      "type": "OpenApiConnection",
+      "inputs": {
+        "host": {
+          "connectionName": "shared_office365users",
+          "operationId": "UserProfile_V2",
+          "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365users"
+        },
+        "parameters": {
+          "id": "@outputs('Get_response_details')?['body/responder']"
+        }
+      },
+      "runAfter": {
+        "Get_response_details": ["Succeeded"]
+      }
+    },
     "Find_matching_assignment": {
       "type": "OpenApiConnection",
       "inputs": {
@@ -76,7 +92,7 @@
         }
       },
       "runAfter": {
-        "Get_response_details": ["Succeeded"]
+        "Get_user_profile": ["Succeeded"]
       }
     },
     "If_assignment_row_found": {
@@ -103,9 +119,8 @@
               "item/Title": "@parameters('surveyTitle')",
               "item/Completed": true,
               "item/CompletedDate": "@utcNow()",
-              "item/Answer1": "@outputs('Get_response_details')?['body/REPLACE_WITH_QUESTION_1_ID']",
-              "item/Answer2": "@outputs('Get_response_details')?['body/REPLACE_WITH_QUESTION_2_ID']",
-              "item/Answer3": "@outputs('Get_response_details')?['body/REPLACE_WITH_QUESTION_3_ID']"
+              "item/ResponderName": "@outputs('Get_user_profile')?['body/displayName']",
+              "item/Answer1": "@outputs('Get_response_details')?['body/REPLACE_WITH_QUESTION_1_ID']"
             }
           }
         }
@@ -128,9 +143,8 @@
                 "item/DueDate": "@utcNow()",
                 "item/Completed": true,
                 "item/CompletedDate": "@utcNow()",
-                "item/Answer1": "@outputs('Get_response_details')?['body/REPLACE_WITH_QUESTION_1_ID']",
-                "item/Answer2": "@outputs('Get_response_details')?['body/REPLACE_WITH_QUESTION_2_ID']",
-                "item/Answer3": "@outputs('Get_response_details')?['body/REPLACE_WITH_QUESTION_3_ID']"
+                "item/ResponderName": "@outputs('Get_user_profile')?['body/displayName']",
+                "item/Answer1": "@outputs('Get_response_details')?['body/REPLACE_WITH_QUESTION_1_ID']"
               }
             }
           }
