@@ -137,21 +137,28 @@ Create a **Scheduled cloud flow** — runs daily, composes one consolidated emai
   ```
 - Top Count: `5000`.
 
-**Action 3 — Filter array `Filter_trigger_rows`** — today's "fire the reminder" rows
+**Action 3 — Initialize variable `outstandingHtml`** (at the top of the flow, before Get items) — holds the per-assignee HTML list
+- Name: `outstandingHtml`
+- Type: `String`
+- Value: leave blank.
+
+**Action 4 — Filter array `Filter_trigger_rows`** — today's "fire the reminder" rows
 - From: `@outputs('Get_items')?['body/value']`
-- Condition (advanced mode):
+- Condition (advanced mode — click the ⇄ icon):
   ```
-  @and(lessOrEquals(item()?['ReminderDate'], outputs('todayDate')), equals(item()?['LastReminderSent'], null))
+  @and(lessOrEquals(formatDateTime(item()?['ReminderDate'], 'yyyy-MM-dd'), outputs('todayDate')), empty(item()?['LastReminderSent']))
   ```
 
-**Action 4 — Select `Select_trigger_emails`** — pull out the email addresses
+  **Why the `formatDateTime` wrapper:** SharePoint returns `ReminderDate` as a full ISO timestamp (`2026-04-30T00:00:00Z`), which sorts *after* `2026-04-30` in a string comparison — so a row due today would be excluded. `formatDateTime(..., 'yyyy-MM-dd')` strips the time so the comparison works. `empty()` (rather than `equals(..., null)`) handles SharePoint's mix of null / empty-string / missing-field semantics reliably.
+
+**Action 5 — Select `Select_trigger_emails`** — pull out the email addresses
 - From: `@body('Filter_trigger_rows')`
-- Map (text mode): `@toLower(item()?['AssigneeEmail'])`
+- Map (text mode — click the **T** icon to switch from key/value to single-value): `@toLower(item()?['AssigneeEmail'])`
 
-**Action 5 — Compose `Unique_assignee_emails`** — dedupe
+**Action 6 — Compose `Unique_assignee_emails`** — dedupe
 - Inputs: `@union(body('Select_trigger_emails'), body('Select_trigger_emails'))`
 
-**Action 6 — Apply to each** (loop over `@outputs('Unique_assignee_emails')`):
+**Action 7 — Apply to each unique assignee** (loop over `@outputs('Unique_assignee_emails')`):
 
 - **Filter array `Filter_this_assignees_outstanding`** — pick out *this person's* outstanding surveys:
   - From: `@outputs('Get_items')?['body/value']`
@@ -160,39 +167,62 @@ Create a **Scheduled cloud flow** — runs daily, composes one consolidated emai
     @equals(toLower(item()?['AssigneeEmail']), items('Apply_to_each'))
     ```
 
-- **Select `Select_outstanding_list_items`** — build one `<li>` per outstanding survey:
-  - From: `@body('Filter_this_assignees_outstanding')`
-  - Map (text mode):
-    ```
-    <li><strong>@{item()?['Title']}</strong> &mdash; <a href="@{item()?['SurveyLink']}">Open survey</a></li>
-    ```
+- **Set variable `Reset_outstandingHtml`** — clears the HTML accumulator for this assignee:
+  - Name: `outstandingHtml`
+  - Value (via the **Expression** tab, because the designer won't accept an empty literal): `concat('')`
+
+- **Apply to each outstanding item** (nested loop over `@body('Filter_this_assignees_outstanding')`):
+  - **Append to string variable**:
+    - Name: `outstandingHtml`
+    - Value:
+      ```html
+      <li><strong>@{items('Apply_to_each_3')?['Title']}</strong> &mdash; <a href="@{items('Apply_to_each_3')?['SurveyLink']}">Open survey</a></li>
+      ```
+      (Use whatever the nested loop's actual internal name is — check its title bar. Spaces become underscores.)
 
 - **Compose `Research_end_pretty`** — format the deadline nicely:
   - Inputs: `@formatDateTime(first(body('Filter_this_assignees_outstanding'))?['ResearchEndDate'], 'dddd d MMMM yyyy, h:mm tt')`
 
+- **Get user profile (V2)** (Office 365 Users) — rename it `Get_assignee_profile`. Resolves the recipient's first name for personalisation.
+  - User (UPN): `@items('Apply_to_each')`
+
 - **Send an email (V2)** (Office 365 Outlook):
   - To: `@items('Apply_to_each')`
   - Subject: `Reminder: outstanding survey(s) to complete`
-  - Body (HTML):
+  - Body (HTML — click the `</>` icon on the Body field to enable code view before pasting):
     ```html
-    <p>Hi,</p>
-    <p>You still have
-      <strong>@{length(body('Filter_this_assignees_outstanding'))}</strong>
-      outstanding survey(s) to complete before the research period closes on
-      <strong>@{outputs('Research_end_pretty')}</strong>:
-    </p>
-    <ul>@{join(body('Select_outstanding_list_items'), '')}</ul>
-    <p>Thanks!</p>
+    <p>Hi @{coalesce(outputs('Get_assignee_profile')?['body/givenName'], 'there')},</p>
+    <p>You still have <strong>@{length(body('Filter_this_assignees_outstanding'))}</strong> outstanding survey(s) to complete before the research period closes on <strong>@{outputs('Research_end_pretty')}</strong>:</p>
+    <ul>@{variables('outstandingHtml')}</ul>
+    <p><b>Still need the app?</b></p>
+    <ol>
+      <li>Open TestFlight → find Linkt → tap Install. Work through your tasks when you're ready.</li>
+    </ol>
+    <p>Email <a href="mailto:[SUPPORT EMAIL]">[SUPPORT EMAIL]</a> if you need a hand — we're here during business hours.</p>
+    <p>Thanks,<br>
+    [name]<br>
+    Linkt Research Team</p>
+    <p>[TU email signature logo]</p>
+    <p>[support email]</p>
     ```
+    Replace `[SUPPORT EMAIL]`, `[name]`, `[support email]`, and `[TU email signature logo]` with your real values. For the logo, swap the placeholder for `<img src="https://your-logo-url.png" alt="TU logo" width="200">` or attach the image inline via Send email's attachment settings and reference it with `cid:logo.png`.
 
-**Action 7 — Apply to each** (loop over `@body('Filter_trigger_rows')`) — stamp LastReminderSent so today's trigger rows don't re-fire tomorrow:
+**Action 8 — Apply to each trigger row** (loop over `@body('Filter_trigger_rows')`) — stamps LastReminderSent so today's trigger rows don't re-fire tomorrow:
 
 - **Update item** (SharePoint):
   - Id: `@items('Apply_to_each_2')?['ID']`
   - Title: `@items('Apply_to_each_2')?['Title']` (required pass-through)
   - LastReminderSent: `@utcNow()`
 
-Save and test. The cleanest dry-run: manually insert a single row with `ReminderDate` = today, `Completed = No`, then trigger the flow. You should receive one email and see `LastReminderSent` populate on the row.
+Save and test. The cleanest dry-run: manually insert a single row with `ReleaseDate` = yesterday, `ReminderDate` = today, `Completed = No`, `ResearchEndDate` in the future, then trigger the flow. You should receive one personalised email and see `LastReminderSent` populate on the row.
+
+### Common pitfalls we hit
+
+- **"Greyed out" Apply to each actions in run history** = 0 iterations. Work backwards: check the output count on each action (Get items → Filter_trigger_rows → Unique_assignee_emails) until you find the one that returned 0.
+- **`concat('')` showing as literal text in the email** = you pasted it into the Value field as text instead of via the Expression tab. Re-enter through the Expression tab so it becomes a coloured chip.
+- **Set variable "value is required" error** = the designer won't accept an empty literal; use `concat('')` via the Expression tab instead.
+- **`"Item/Title" is no longer present in the operation schema"` error on Update item** = the SharePoint schema cache is stale. Re-select the list name in the action's dropdown to force a refresh, or delete and recreate the action.
+- **`Get_assignee_profile` reference errors** = the action's display name doesn't match the expression name. Rename the action to exactly `Get_assignee_profile` (no spaces, no parens) via **⋯ → Rename** so the expression resolves.
 
 ## 4. Build the Forms ingestion flow
 
@@ -254,6 +284,6 @@ Microsoft Forms triggers are bound to a single form, so make 4 ingestion flows �
 ## Files in this repo
 
 - `README.md` — this file.
-- `flow-definition.json` — the reminder flow (daily recurrence → outstanding query → group by assignee → per-person consolidated email → stamp trigger rows).
+- `flow-definition.json` — the reminder flow (daily recurrence → outstanding query → filter today's trigger rows → group by assignee → build per-person HTML list via a string variable → fetch display name via Office 365 Users → send personalised consolidated email → stamp trigger rows). `[SUPPORT EMAIL]`, `[name]`, and the logo block in the email body are placeholders — replace before going live.
 - `forms-to-sharepoint-flow.json` — the Forms ingestion flow (Forms response → resolve display name → look up assignment → write `ResponderName`, `Answer1`, `Completed = Yes`). Duplicate this one per form and edit the `surveyTitle` parameter and the `REPLACE_WITH_QUESTION_1_ID` placeholder each time.
 - `excel-to-assignments-flow.json` — the seeding flow (manual trigger → read distribution list → dedupe → create rows with per-survey dates). Replace the `REPLACE_WITH_*` Excel placeholders with your document library and file IDs. Run once per survey.

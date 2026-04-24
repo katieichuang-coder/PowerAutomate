@@ -30,10 +30,25 @@
     }
   },
   "actions": {
+    "Initialize_outstandingHtml": {
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "outstandingHtml",
+            "type": "string",
+            "value": ""
+          }
+        ]
+      },
+      "runAfter": {}
+    },
     "todayDate": {
       "type": "Compose",
       "inputs": "@formatDateTime(utcNow(), 'yyyy-MM-dd')",
-      "runAfter": {}
+      "runAfter": {
+        "Initialize_outstandingHtml": ["Succeeded"]
+      }
     },
     "Get_outstanding_assignments": {
       "type": "OpenApiConnection",
@@ -58,7 +73,7 @@
       "type": "Query",
       "inputs": {
         "from": "@outputs('Get_outstanding_assignments')?['body/value']",
-        "where": "@and(lessOrEquals(item()?['ReminderDate'], outputs('todayDate')), equals(item()?['LastReminderSent'], null))"
+        "where": "@and(lessOrEquals(formatDateTime(item()?['ReminderDate'], 'yyyy-MM-dd'), outputs('todayDate')), empty(item()?['LastReminderSent']))"
       },
       "runAfter": {
         "Get_outstanding_assignments": ["Succeeded"]
@@ -92,21 +107,53 @@
             "where": "@equals(toLower(item()?['AssigneeEmail']), items('For_each_unique_assignee'))"
           }
         },
-        "Select_outstanding_list_items": {
-          "type": "Select",
+        "Reset_outstandingHtml": {
+          "type": "SetVariable",
           "inputs": {
-            "from": "@body('Filter_this_assignees_outstanding')",
-            "select": "<li><strong>@{item()?['Title']}</strong> &mdash; <a href=\"@{item()?['SurveyLink']}\">Open survey</a></li>"
+            "name": "outstandingHtml",
+            "value": "@concat('')"
           },
           "runAfter": {
             "Filter_this_assignees_outstanding": ["Succeeded"]
+          }
+        },
+        "For_each_outstanding_item": {
+          "type": "Foreach",
+          "foreach": "@body('Filter_this_assignees_outstanding')",
+          "actions": {
+            "Append_outstanding_list_item": {
+              "type": "AppendToStringVariable",
+              "inputs": {
+                "name": "outstandingHtml",
+                "value": "<li><strong>@{items('For_each_outstanding_item')?['Title']}</strong> &mdash; <a href=\"@{items('For_each_outstanding_item')?['SurveyLink']}\">Open survey</a></li>"
+              }
+            }
+          },
+          "runAfter": {
+            "Reset_outstandingHtml": ["Succeeded"]
           }
         },
         "Research_end_pretty": {
           "type": "Compose",
           "inputs": "@formatDateTime(first(body('Filter_this_assignees_outstanding'))?['ResearchEndDate'], 'dddd d MMMM yyyy, h:mm tt')",
           "runAfter": {
-            "Select_outstanding_list_items": ["Succeeded"]
+            "For_each_outstanding_item": ["Succeeded"]
+          }
+        },
+        "Get_assignee_profile": {
+          "type": "OpenApiConnection",
+          "inputs": {
+            "host": {
+              "connectionName": "shared_office365users",
+              "operationId": "UserProfile_V2",
+              "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365users"
+            },
+            "parameters": {
+              "id": "@items('For_each_unique_assignee')"
+            }
+          },
+          "runAfter": {
+            "Research_end_pretty": ["Succeeded"]
           }
         },
         "Send_reminder_email": {
@@ -120,12 +167,12 @@
             "parameters": {
               "emailMessage/To": "@items('For_each_unique_assignee')",
               "emailMessage/Subject": "Reminder: outstanding survey(s) to complete",
-              "emailMessage/Body": "<p>Hi,</p><p>You still have <strong>@{length(body('Filter_this_assignees_outstanding'))}</strong> outstanding survey(s) to complete before the research period closes on <strong>@{outputs('Research_end_pretty')}</strong>:</p><ul>@{join(body('Select_outstanding_list_items'), '')}</ul><p>Thanks!</p>",
+              "emailMessage/Body": "<p>Hi @{coalesce(outputs('Get_assignee_profile')?['body/givenName'], 'there')},</p><p>You still have <strong>@{length(body('Filter_this_assignees_outstanding'))}</strong> outstanding survey(s) to complete before the research period closes on <strong>@{outputs('Research_end_pretty')}</strong>:</p><ul>@{variables('outstandingHtml')}</ul><p><b>Still need the app?</b></p><ol><li>Open TestFlight &rarr; find Linkt &rarr; tap Install. Work through your tasks when you're ready.</li></ol><p>Email <a href=\"mailto:[SUPPORT EMAIL]\">[SUPPORT EMAIL]</a> if you need a hand &mdash; we're here during business hours.</p><p>Thanks,<br>[name]<br>Linkt Research Team</p><p>[TU email signature logo]</p><p>[support email]</p>",
               "emailMessage/Importance": "Normal"
             }
           },
           "runAfter": {
-            "Research_end_pretty": ["Succeeded"]
+            "Get_assignee_profile": ["Succeeded"]
           }
         }
       },
