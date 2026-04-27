@@ -1,0 +1,269 @@
+{
+  "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "$connections": {
+      "defaultValue": {},
+      "type": "Object"
+    },
+    "sharepointSiteAddress": {
+      "defaultValue": "https://contoso.sharepoint.com/sites/Surveys",
+      "type": "String"
+    },
+    "sharepointAssignmentsList": {
+      "defaultValue": "SurveyAssignments",
+      "type": "String"
+    },
+    "distributionLibraryName": {
+      "defaultValue": "Documents",
+      "type": "String"
+    },
+    "distributionFolderPath": {
+      "defaultValue": "/SurveyOps",
+      "type": "String"
+    },
+    "distributionFileName": {
+      "defaultValue": "Distribution.xlsx",
+      "type": "String"
+    },
+    "excelDriveId": {
+      "defaultValue": "REPLACE_WITH_SHAREPOINT_DOCUMENT_LIBRARY_ID",
+      "type": "String"
+    },
+    "excelFileId": {
+      "defaultValue": "REPLACE_WITH_FILE_ID",
+      "type": "String"
+    },
+    "excelTableName": {
+      "defaultValue": "Distribution",
+      "type": "String"
+    }
+  },
+  "triggers": {
+    "When_distribution_file_is_modified": {
+      "type": "OpenApiConnection",
+      "inputs": {
+        "host": {
+          "connectionName": "shared_sharepointonline",
+          "operationId": "GetOnUpdatedFileItems",
+          "apiId": "/providers/Microsoft.PowerApps/apis/shared_sharepointonline"
+        },
+        "parameters": {
+          "dataset": "@parameters('sharepointSiteAddress')",
+          "table": "@parameters('distributionLibraryName')",
+          "folderPath": "@parameters('distributionFolderPath')"
+        }
+      },
+      "recurrence": {
+        "frequency": "Minute",
+        "interval": 1
+      }
+    }
+  },
+  "actions": {
+    "Is_distribution_file": {
+      "type": "If",
+      "expression": {
+        "equals": [
+          "@triggerOutputs()?['body/{FilenameWithExtension}']",
+          "@parameters('distributionFileName')"
+        ]
+      },
+      "actions": {
+        "SurveyConfigs": {
+          "type": "Compose",
+          "inputs": [
+            {
+              "title": "Survey 1",
+              "link": "https://forms.office.com/r/yourSurvey1Id",
+              "releaseDate": "2026-04-28",
+              "reminderDate": "2026-04-30",
+              "researchEndDate": "2026-05-10T23:45:00",
+              "taskInstructions": "Open the Linkt app, complete Task 1, then submit your responses via the survey link above."
+            },
+            {
+              "title": "Survey 2",
+              "link": "https://forms.office.com/r/yourSurvey2Id",
+              "releaseDate": "2026-05-01",
+              "reminderDate": "2026-05-03",
+              "researchEndDate": "2026-05-10T23:45:00",
+              "taskInstructions": "Complete Task 2 in the Linkt app, then submit your survey responses."
+            },
+            {
+              "title": "Survey 3",
+              "link": "https://forms.office.com/r/yourSurvey3Id",
+              "releaseDate": "2026-05-04",
+              "reminderDate": "2026-05-06",
+              "researchEndDate": "2026-05-10T23:45:00",
+              "taskInstructions": "Complete Task 3 in the Linkt app, then submit your survey responses."
+            },
+            {
+              "title": "Survey 4",
+              "link": "https://forms.office.com/r/yourSurvey4Id",
+              "releaseDate": "2026-05-07",
+              "reminderDate": "2026-05-10",
+              "researchEndDate": "2026-05-10T23:45:00",
+              "taskInstructions": "Complete Task 4 in the Linkt app, then submit your survey responses."
+            }
+          ]
+        },
+        "List_rows_from_distribution_workbook": {
+          "type": "OpenApiConnection",
+          "inputs": {
+            "host": {
+              "connectionName": "shared_excelonlinebusiness",
+              "operationId": "GetItems",
+              "apiId": "/providers/Microsoft.PowerApps/apis/shared_excelonlinebusiness"
+            },
+            "parameters": {
+              "source": "@parameters('excelDriveId')",
+              "drive": "@parameters('excelDriveId')",
+              "file": "@parameters('excelFileId')",
+              "table": "@parameters('excelTableName')"
+            }
+          },
+          "runAfter": {
+            "SurveyConfigs": ["Succeeded"]
+          }
+        },
+        "For_each_distribution_row": {
+          "type": "Foreach",
+          "foreach": "@outputs('List_rows_from_distribution_workbook')?['body/value']",
+          "actions": {
+            "Get_existing_rows_for_email": {
+              "type": "OpenApiConnection",
+              "inputs": {
+                "host": {
+                  "connectionName": "shared_sharepointonline",
+                  "operationId": "GetItems",
+                  "apiId": "/providers/Microsoft.PowerApps/apis/shared_sharepointonline"
+                },
+                "parameters": {
+                  "dataset": "@parameters('sharepointSiteAddress')",
+                  "table": "@parameters('sharepointAssignmentsList')",
+                  "$filter": "AssigneeEmail eq '@{items('For_each_distribution_row')?['Email']}'",
+                  "$top": 10
+                }
+              }
+            },
+            "For_each_survey": {
+              "type": "Foreach",
+              "foreach": "@outputs('SurveyConfigs')",
+              "actions": {
+                "Already_assigned": {
+                  "type": "Query",
+                  "inputs": {
+                    "from": "@outputs('Get_existing_rows_for_email')?['body/value']",
+                    "where": "@equals(item()?['Title'], items('For_each_survey')?['title'])"
+                  }
+                },
+                "If_not_yet_assigned": {
+                  "type": "If",
+                  "expression": {
+                    "equals": [
+                      "@length(body('Already_assigned'))",
+                      0
+                    ]
+                  },
+                  "actions": {
+                    "Create_assignment_row": {
+                      "type": "OpenApiConnection",
+                      "inputs": {
+                        "host": {
+                          "connectionName": "shared_sharepointonline",
+                          "operationId": "PostItem",
+                          "apiId": "/providers/Microsoft.PowerApps/apis/shared_sharepointonline"
+                        },
+                        "parameters": {
+                          "dataset": "@parameters('sharepointSiteAddress')",
+                          "table": "@parameters('sharepointAssignmentsList')",
+                          "item/Title": "@items('For_each_survey')?['title']",
+                          "item/AssigneeEmail": "@items('For_each_distribution_row')?['Email']",
+                          "item/ReleaseDate": "@items('For_each_survey')?['releaseDate']",
+                          "item/ReminderDate": "@items('For_each_survey')?['reminderDate']",
+                          "item/ResearchEndDate": "@items('For_each_survey')?['researchEndDate']",
+                          "item/SurveyLink": "@items('For_each_survey')?['link']",
+                          "item/TaskInstructions": "@items('For_each_survey')?['taskInstructions']",
+                          "item/Completed": false
+                        }
+                      }
+                    }
+                  },
+                  "runAfter": {
+                    "Already_assigned": ["Succeeded"]
+                  }
+                }
+              },
+              "runAfter": {
+                "Get_existing_rows_for_email": ["Succeeded"]
+              }
+            },
+            "Is_new_participant": {
+              "type": "If",
+              "expression": {
+                "equals": [
+                  "@length(outputs('Get_existing_rows_for_email')?['body/value'])",
+                  0
+                ]
+              },
+              "actions": {
+                "Get_new_participant_profile": {
+                  "type": "OpenApiConnection",
+                  "inputs": {
+                    "host": {
+                      "connectionName": "shared_office365users",
+                      "operationId": "UserProfile_V2",
+                      "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365users"
+                    },
+                    "parameters": {
+                      "id": "@items('For_each_distribution_row')?['Email']"
+                    }
+                  }
+                },
+                "Send_welcome_email": {
+                  "type": "OpenApiConnection",
+                  "inputs": {
+                    "host": {
+                      "connectionName": "shared_office365",
+                      "operationId": "SendEmailV2",
+                      "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365"
+                    },
+                    "parameters": {
+                      "emailMessage/To": "@items('For_each_distribution_row')?['Email']",
+                      "emailMessage/Subject": "Welcome to the Linkt research study — Survey 1 ready for you",
+                      "emailMessage/Body": "<p>Hi @{coalesce(outputs('Get_new_participant_profile')?['body/givenName'], 'there')},</p><p>Welcome to the Linkt research study! Over the next two weeks you'll be invited to complete <strong>4 short surveys</strong>, each tied to a small task in the Linkt app.</p><p>Your first survey is ready now:</p><p><strong>Survey 1</strong> &mdash; <a href=\"@{first(filter(outputs('SurveyConfigs'), equals(item()?['title'], 'Survey 1')))?['link']}\">Open survey</a></p><p><strong>Task instructions:</strong> @{first(filter(outputs('SurveyConfigs'), equals(item()?['title'], 'Survey 1')))?['taskInstructions']}</p><p>The remaining 3 surveys will be released over the next two weeks. We'll send reminders if you haven't completed any by their reminder dates. All 4 must be completed by <strong>Sun 10 May 2026, 11:45 PM</strong>.</p><p><b>Still need the app?</b></p><ol><li>Open TestFlight &rarr; find Linkt &rarr; tap Install. Work through your tasks when you're ready.</li></ol><p>Email <a href=\"mailto:[SUPPORT EMAIL]\">[SUPPORT EMAIL]</a> if you need a hand &mdash; we're here during business hours.</p><p>Thanks,<br>[name]<br>Linkt Research Team</p><p>[TU email signature logo]</p><p>[support email]</p>",
+                      "emailMessage/Importance": "Normal"
+                    }
+                  },
+                  "runAfter": {
+                    "Get_new_participant_profile": ["Succeeded"]
+                  }
+                }
+              },
+              "else": {
+                "actions": {}
+              },
+              "runAfter": {
+                "For_each_survey": ["Succeeded"]
+              }
+            }
+          },
+          "runAfter": {
+            "List_rows_from_distribution_workbook": ["Succeeded"]
+          }
+        }
+      },
+      "else": {
+        "actions": {
+          "Skip_other_files": {
+            "type": "Terminate",
+            "inputs": {
+              "runStatus": "Succeeded"
+            }
+          }
+        }
+      },
+      "runAfter": {}
+    }
+  }
+}

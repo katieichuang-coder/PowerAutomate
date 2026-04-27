@@ -125,7 +125,7 @@
               "type": "AppendToStringVariable",
               "inputs": {
                 "name": "outstandingHtml",
-                "value": "<li><strong>@{items('For_each_outstanding_item')?['Title']}</strong> &mdash; <a href=\"@{items('For_each_outstanding_item')?['SurveyLink']}\">Open survey</a></li>"
+                "value": "<li><strong>@{items('For_each_outstanding_item')?['Title']}</strong> &mdash; <a href=\"@{items('For_each_outstanding_item')?['SurveyLink']}\">Open survey</a><br><em>Task:</em> @{items('For_each_outstanding_item')?['TaskInstructions']}</li>"
               }
             }
           },

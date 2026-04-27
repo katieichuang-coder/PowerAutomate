@@ -1,10 +1,12 @@
 # Survey Reminder Flows
 
-Three Microsoft Power Automate flows that work together to run a multi-survey research campaign end-to-end:
+Microsoft Power Automate flows that run a multi-survey research campaign end-to-end:
 
-1. **Seeding flow** — reads an Excel distribution list and creates one `SurveyAssignments` row per person per survey.
-2. **Reminder flow** — runs daily, and on each survey's reminder date sends every assignee who still has outstanding surveys a single consolidated email listing all of them.
+1. **Auto-seed flow** — watches an Excel distribution list in SharePoint; on every save it creates `SurveyAssignments` rows for any newly-added emails (one per survey) and emails brand-new participants a welcome message with the first survey link and task instructions.
+2. **Reminder flow** — runs daily; on each survey's reminder date it sends every assignee who still has outstanding surveys a single consolidated email listing all of them with their task instructions.
 3. **Ingestion flow** — listens to Microsoft Forms responses and marks the matching assignment row `Completed = Yes` so reminders stop for that person.
+
+A manual seeding flow (`excel-to-assignments-flow.json`) is also kept in the repo as a backup / fallback — useful if you'd rather seed assignments by clicking Run once per survey instead of letting file saves trigger automatically.
 
 ## Campaign model
 
@@ -53,10 +55,11 @@ Create a list called **`SurveyAssignments`** with these columns:
 | `CompletedDate`     | Date and Time             | Written by the ingestion flow on submission.                     |
 | `ResponderName`     | Single line of text       | Written by the ingestion flow on submission.                     |
 | `Answer1`           | Multiple lines of text    | Answer to question 1. Rename to match the question if you like.  |
+| `TaskInstructions`  | Multiple lines of text    | Task instructions accompanying this survey. Written by the seeding flow; surfaced in welcome and reminder emails. |
 
-## 2. Build the seeding flow (Excel → SharePoint)
+## 2. Build the auto-seed flow (Distribution.xlsx → SharePoint)
 
-You'll run this flow **four times** — once per survey — feeding it that survey's release date and reminder date.
+This flow watches `Distribution.xlsx` and, on every save, creates assignment rows for any newly-added emails and emails them a welcome message. Existing participants are skipped via dedup. All 4 surveys are assigned to every participant — even if they join after some surveys' release dates, so they catch up via the reminder flow.
 
 ### Prepare the Excel file
 
@@ -64,49 +67,89 @@ You'll run this flow **four times** — once per survey — feeding it that surv
 2. The data must be a real Excel **table**, not a plain range. Select the data → **Insert → Table** → check "My table has headers" → name the table `Distribution` under **Table Design**.
 3. Required column: `Email`. Anything else is ignored.
 
-### Build it (Instant cloud flow)
+### Build it (Automated cloud flow)
 
-**Trigger — Manually trigger a flow** with five inputs:
-- `surveyTitle` (Text) — e.g. `Survey 1`. Must match the Title used by the ingestion flow for this survey.
-- `surveyLink` (Text) — the URL users click to take the survey.
-- `releaseDate` (Date) — `yyyy-MM-dd`.
-- `reminderDate` (Date) — `yyyy-MM-dd`.
-- `researchEndDate` (Text) — ISO 8601, e.g. `2026-05-10T23:45:00`.
+**Trigger — SharePoint → When a file is created or modified (properties only)**
+- Site Address: your SharePoint site.
+- Library Name: the document library that holds `Distribution.xlsx` (usually `Documents`).
+- Folder (advanced options): point at the folder containing the file, e.g. `/SurveyOps`.
 
-**Action 1 — Get items** (SharePoint) — load existing assignments to dedupe
-- Site Address / List Name: your list.
-- Filter Query: `Title eq '@{triggerBody()?['surveyTitle']}'`
-- Select Query: `AssigneeEmail`
-- Top Count: `5000`.
+**Action 1 — Condition `Is_distribution_file`** — only proceed if the saved file is `Distribution.xlsx`
+- Left: Expression `triggerOutputs()?['body/{FilenameWithExtension}']`
+- Operator: `is equal to`
+- Right: `Distribution.xlsx`
+- **If no** branch: add a **Terminate** action with status `Succeeded`. Silently skips other files in the folder.
+- **If yes** branch: holds the rest of the actions below.
 
-**Action 2 — List rows present in a table** (Excel Online (Business))
+**Action 2 — Compose `SurveyConfigs`** — embed the 4 surveys' configuration
+- Inputs: paste the JSON from `distribution-watcher-flow.json` (the array under `SurveyConfigs.inputs`). One object per survey with `title`, `link`, `releaseDate`, `reminderDate`, `researchEndDate`, and `taskInstructions`. Replace the form URLs and instruction text with your real values.
+
+**Action 3 — List rows present in a table** (Excel Online (Business))
 - Location / Document Library / File: point at `Distribution.xlsx`.
 - Table: `Distribution`.
 
-**Action 3 — Apply to each** (loop over `value` from Action 2):
+**Action 4 — Apply to each `For_each_distribution_row`** (loop over Excel rows):
 
-- **Action 3a — Filter array** — is this email already assigned for this survey?
-  - From: `@outputs('Get_items')?['body/value']`
-  - Condition (advanced mode):
-    ```
-    @equals(toLower(item()?['AssigneeEmail']), toLower(items('Apply_to_each')?['Email']))
-    ```
+- **Get items `Get_existing_rows_for_email`** (SharePoint) — count this person's existing rows
+  - Filter Query: `AssigneeEmail eq '@{items('For_each_distribution_row')?['Email']}'`
+  - Top Count: `10`.
 
-- **Action 3b — Condition** — `length(body('Filter_array'))` is equal to `0`
-  - **If yes — Create item** (SharePoint):
-    - Title: `@triggerBody()?['surveyTitle']`
-    - AssigneeEmail: `@items('Apply_to_each')?['Email']`
-    - ReleaseDate: `@triggerBody()?['releaseDate']`
-    - ReminderDate: `@triggerBody()?['reminderDate']`
-    - ResearchEndDate: `@triggerBody()?['researchEndDate']`
-    - SurveyLink: `@triggerBody()?['surveyLink']`
-    - Completed: `No`
-    - (Leave the other columns blank — the other flows fill them.)
-  - **If no** — skip; the person is already assigned.
+- **Apply to each `For_each_survey`** (nested loop, `outputs('SurveyConfigs')`):
+  - **Filter array `Already_assigned`**
+    - From: `body('Get_existing_rows_for_email')?['value']`
+    - Condition (advanced mode): `@equals(item()?['Title'], items('For_each_survey')?['title'])`
+  - **Condition** — `length(body('Already_assigned'))` is equal to `0`
+    - **If yes — Create item** (SharePoint):
+      - Title: `@items('For_each_survey')?['title']`
+      - AssigneeEmail: `@items('For_each_distribution_row')?['Email']`
+      - ReleaseDate: `@items('For_each_survey')?['releaseDate']`
+      - ReminderDate: `@items('For_each_survey')?['reminderDate']`
+      - ResearchEndDate: `@items('For_each_survey')?['researchEndDate']`
+      - SurveyLink: `@items('For_each_survey')?['link']`
+      - TaskInstructions: `@items('For_each_survey')?['taskInstructions']`
+      - Completed: `No`.
 
-### Running it for the current campaign
+- **Condition `Is_new_participant`** — was this email's existing row count `0` *before* we created any?
+  - Left: Expression `length(body('Get_existing_rows_for_email')?['value'])`
+  - Operator: `is equal to`
+  - Right: `0`
+  - **If yes** branch:
+    - **Get user profile (V2)** (Office 365 Users), renamed `Get_new_participant_profile`. User (UPN): `@items('For_each_distribution_row')?['Email']`
+    - **Send an email (V2)** (Office 365 Outlook), renamed `Send_welcome_email`:
+      - To: `@items('For_each_distribution_row')?['Email']`
+      - Subject: `Welcome to the Linkt research study — Survey 1 ready for you`
+      - Body (HTML, paste with `</>` Code View on):
+        ```html
+        <p>Hi @{coalesce(outputs('Get_new_participant_profile')?['body/givenName'], 'there')},</p>
+        <p>Welcome to the Linkt research study! Over the next two weeks you'll be invited to complete <strong>4 short surveys</strong>, each tied to a small task in the Linkt app.</p>
+        <p>Your first survey is ready now:</p>
+        <p><strong>Survey 1</strong> — <a href="@{first(filter(outputs('SurveyConfigs'), equals(item()?['title'], 'Survey 1')))?['link']}">Open survey</a></p>
+        <p><strong>Task instructions:</strong> @{first(filter(outputs('SurveyConfigs'), equals(item()?['title'], 'Survey 1')))?['taskInstructions']}</p>
+        <p>The remaining 3 surveys will be released over the next two weeks. We'll send reminders if you haven't completed any by their reminder dates. All 4 must be completed by <strong>Sun 10 May 2026, 11:45 PM</strong>.</p>
+        <p><b>Still need the app?</b></p>
+        <ol>
+          <li>Open TestFlight → find Linkt → tap Install. Work through your tasks when you're ready.</li>
+        </ol>
+        <p>Email <a href="mailto:[SUPPORT EMAIL]">[SUPPORT EMAIL]</a> if you need a hand — we're here during business hours.</p>
+        <p>Thanks,<br>
+        [name]<br>
+        Linkt Research Team</p>
+        <p>[TU email signature logo]</p>
+        <p>[support email]</p>
+        ```
+        Replace the placeholders before going live.
+  - **If no** branch: leave empty (existing participants don't get re-welcomed).
 
-Run it four times with these inputs (dates as `yyyy-MM-dd`, end date as ISO 8601):
+### Operating notes
+
+- **Toggle the flow Off while you edit the spreadsheet pre-launch.** Turn it back On when ready to start admitting participants. Past saves don't replay; only saves while the flow is on are picked up.
+- **Re-saves with no new emails** are safe: dedup catches everyone, no rows or emails are created.
+- **Removing an email from the spreadsheet does not delete their assignment rows.** Delete those manually in SharePoint if you want to stop reminding someone.
+- **Bulk paste risk.** A 5,000-row paste & save will assign all 5,000. Decide who has write access to `Distribution.xlsx`.
+
+### Backup: manual seeding flow
+
+If you'd rather seed by clicking Run, the original manual flow is still in the repo as `excel-to-assignments-flow.json` — same logic, but with a *Manually trigger a flow* trigger and per-run inputs. Walk-through is in the file's parameters section. Run it four times (once per survey) using the values:
 
 | Run | surveyTitle | releaseDate | reminderDate | researchEndDate         |
 | --- | ----------- | ----------- | ------------ | ----------------------- |
@@ -115,9 +158,7 @@ Run it four times with these inputs (dates as `yyyy-MM-dd`, end date as ISO 8601
 | 3   | Survey 3    | 2026-05-04  | 2026-05-06   | 2026-05-10T23:45:00     |
 | 4   | Survey 4    | 2026-05-07  | 2026-05-10   | 2026-05-10T23:45:00     |
 
-Adjust the year for your actual campaign. The `researchEndDate` should be written in your tenant's local time — SharePoint stores it, and the reminder flow compares it with `utcNow()` so it will behave correctly as long as the stored value reflects an absolute point in time.
-
-Re-running a survey's seeding run is safe: existing rows are skipped.
+The manual flow doesn't write `TaskInstructions` and doesn't send the welcome email — use the auto-seed flow as your default; this one is just a fallback.
 
 ## 3. Build the reminder flow
 
@@ -176,7 +217,7 @@ Create a **Scheduled cloud flow** — runs daily, composes one consolidated emai
     - Name: `outstandingHtml`
     - Value:
       ```html
-      <li><strong>@{items('Apply_to_each_3')?['Title']}</strong> &mdash; <a href="@{items('Apply_to_each_3')?['SurveyLink']}">Open survey</a></li>
+      <li><strong>@{items('Apply_to_each_3')?['Title']}</strong> &mdash; <a href="@{items('Apply_to_each_3')?['SurveyLink']}">Open survey</a><br><em>Task:</em> @{items('Apply_to_each_3')?['TaskInstructions']}</li>
       ```
       (Use whatever the nested loop's actual internal name is — check its title bar. Spaces become underscores.)
 
@@ -284,6 +325,7 @@ Microsoft Forms triggers are bound to a single form, so make 4 ingestion flows �
 ## Files in this repo
 
 - `README.md` — this file.
-- `flow-definition.json` — the reminder flow (daily recurrence → outstanding query → filter today's trigger rows → group by assignee → build per-person HTML list via a string variable → fetch display name via Office 365 Users → send personalised consolidated email → stamp trigger rows). `[SUPPORT EMAIL]`, `[name]`, and the logo block in the email body are placeholders — replace before going live.
+- `distribution-watcher-flow.json` — the auto-seed flow (file-modified trigger on `Distribution.xlsx` → embedded SurveyConfigs → per-participant dedup + 4-row creation → welcome email for brand-new participants). Replace the form URLs, `taskInstructions`, and email-body placeholders (`[SUPPORT EMAIL]`, `[name]`, logo) before going live.
+- `flow-definition.json` — the reminder flow (daily recurrence → outstanding query → filter today's trigger rows → group by assignee → build per-person HTML list via a string variable → fetch display name via Office 365 Users → send personalised consolidated email with task instructions → stamp trigger rows). Same email-body placeholders to replace.
 - `forms-to-sharepoint-flow.json` — the Forms ingestion flow (Forms response → resolve display name → look up assignment → write `ResponderName`, `Answer1`, `Completed = Yes`). Duplicate this one per form and edit the `surveyTitle` parameter and the `REPLACE_WITH_QUESTION_1_ID` placeholder each time.
-- `excel-to-assignments-flow.json` — the seeding flow (manual trigger → read distribution list → dedupe → create rows with per-survey dates). Replace the `REPLACE_WITH_*` Excel placeholders with your document library and file IDs. Run once per survey.
+- `excel-to-assignments-flow.json` — fallback manual seeding flow (manual trigger → read distribution list → dedupe → create rows with per-survey dates). Run once per survey. Doesn't write `TaskInstructions` or send a welcome email — use the auto-seed flow as your default.
